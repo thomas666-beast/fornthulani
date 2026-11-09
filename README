@@ -1,0 +1,353 @@
+fornthulani
+===========
+
+A from-scratch micro HTTP framework in Rust.
+Responds with JSON, MessagePack, or streamed file downloads.
+Controllers are plain fns. Routes support :params. Statuses are typed constants.
+Zero HTTP dependencies — built on std::net::TcpListener.
+
+Named after the Old Norse *forn* (ancient) + *þulani* (reciter/list).
+fornthulani recites responses from an ordered route table.
+
+
+----------------------------------------------------------------------
+CONTENTS
+----------------------------------------------------------------------
+
+  1. Install
+  2. Quick start
+  3. JSON
+  4. MessagePack
+  5. File download
+  6. Routes
+  7. Route parameters
+  8. Status codes
+  9. Errors
+ 10. Graceful shutdown
+ 11. Plugins
+ 12. Design
+ 13. Status
+ 14. License
+
+
+----------------------------------------------------------------------
+1. INSTALL
+----------------------------------------------------------------------
+
+Add to Cargo.toml:
+
+  [dependencies]
+  fornthulani = "0.1.0"
+
+
+----------------------------------------------------------------------
+2. QUICK START
+----------------------------------------------------------------------
+
+  use fornthulani::{Params, Request, Response, Router, Server, Status, ThulaniError};
+
+  fn hello(_: &Request, _: &Params) -> Result<Response, ThulaniError> {
+      Ok(Response::text(Status::OK, "hello, fornthulani"))
+  }
+
+  fn main() -> std::io::Result<()> {
+      let mut router = Router::new();
+      router.get("/hello", hello);
+      Server::new(router).run_blocking("127.0.0.1:8080")
+  }
+
+Test it:
+
+  curl http://127.0.0.1:8080/hello
+  # hello, fornthulani
+
+
+----------------------------------------------------------------------
+3. JSON
+----------------------------------------------------------------------
+
+  use serde::Serialize;
+  use fornthulani::{Params, Request, Response, Status, ThulaniError};
+
+  #[derive(Serialize)]
+  struct User {
+      id: u32,
+      name: &'static str,
+  }
+
+  fn show(_: &Request, params: &Params) -> Result<Response, ThulaniError> {
+      let id: u32 = params.require("id")?.parse().unwrap_or(0);
+      Ok(Response::json(Status::OK, &User { id, name: "ada" }))
+  }
+
+Response header includes:
+
+  Content-Type: application/json
+
+
+----------------------------------------------------------------------
+4. MESSAGEPACK
+----------------------------------------------------------------------
+
+  fn show(_: &Request, _: &Params) -> Result<Response, ThulaniError> {
+      Ok(Response::msgpack(Status::OK, &User { id: 7, name: "ada" }))
+  }
+
+Response header includes:
+
+  Content-Type: application/msgpack
+
+Uses named-field encoding, so struct field names survive the round trip.
+
+
+----------------------------------------------------------------------
+5. FILE DOWNLOAD (STREAMED)
+----------------------------------------------------------------------
+
+  use fornthulani::{FileStream, Params, Request, ThulaniError};
+
+  fn download(_: &Request, _: &Params) -> Result<FileStream, ThulaniError> {
+      Ok(FileStream::open("report.pdf")?)
+  }
+
+Streams from disk — the file is never loaded fully into memory.
+Sets Content-Type from the extension, Content-Length, and:
+
+  Content-Disposition: attachment; filename="report.pdf"
+
+
+----------------------------------------------------------------------
+6. ROUTES
+----------------------------------------------------------------------
+
+  router.get("/users", list)             ->  GET    /users
+  router.get("/users/:id", show)         ->  GET    /users/42
+  router.post("/users", create)          ->  POST   /users
+  router.put("/users/:id", update)       ->  PUT    /users/42
+  router.delete("/users/:id", destroy)   ->  DELETE /users/42
+
+  - Wrong method on an existing path  ->  405 Method Not Allowed
+  - Unknown path                      ->  404 Not Found
+
+Route groups:
+
+  router.group("/api/v1", |r| {
+      r.get("/users", list_users);
+      r.post("/users", create_user);
+  });
+
+Named routes:
+
+  router.get("/users/:id", show_user).name("user_show");
+  let path = router.path_for("user_show"); // Some("/users/:id")
+
+
+----------------------------------------------------------------------
+7. ROUTE PARAMETERS
+----------------------------------------------------------------------
+
+Segments starting with : capture the corresponding URL segment.
+
+  use fornthulani::{Params, Request, Response, Status, ThulaniError};
+
+  fn show(_: &Request, params: &Params) -> Result<Response, ThulaniError> {
+      let id = params.require("id")?;   // 500 if the param is missing
+      let x  = params.get("x");         // Option<&str>
+      Ok(Response::text(Status::OK, id))
+  }
+
+  router.get("/users/:id", show);
+
+  Params::require  ->  Result<&str, ThulaniError>
+  Params::get      ->  Option<&str>
+
+
+----------------------------------------------------------------------
+8. STATUS CODES
+----------------------------------------------------------------------
+
+Named constants. No magic numbers anywhere.
+
+  Status::OK
+  Status::CREATED
+  Status::NO_CONTENT
+  Status::BAD_REQUEST
+  Status::UNAUTHORIZED
+  Status::FORBIDDEN
+  Status::NOT_FOUND
+  Status::METHOD_NOT_ALLOWED
+  Status::CONFLICT
+  Status::UNPROCESSABLE_ENTITY
+  Status::INTERNAL_SERVER_ERROR
+
+
+----------------------------------------------------------------------
+9. ERRORS
+----------------------------------------------------------------------
+
+Return Err(ThulaniError) from a controller. The framework maps it to
+the right status code and body.
+
+  use fornthulani::{Params, Request, Response, Status, ThulaniError};
+
+  fn show(_: &Request, params: &Params) -> Result<Response, ThulaniError> {
+      let id = params.require("id")?;
+      if id == "0" {
+          return Err(ThulaniError::NotFound("no user 0".into()));
+      }
+      Ok(Response::text(Status::OK, id))
+  }
+
+Mapping:
+
+  ThulaniError::NotFound          ->  404
+  ThulaniError::MethodNotAllowed  ->  405
+  ThulaniError::BadRequest        ->  400
+  ThulaniError::Internal          ->  500
+  ThulaniError::Io                ->  500
+
+
+----------------------------------------------------------------------
+10. GRACEFUL SHUTDOWN
+----------------------------------------------------------------------
+
+  use fornthulani::{Router, Server};
+
+  fn main() -> std::io::Result<()> {
+      let mut router = Router::new();
+      // ... register routes ...
+
+      let (handle, join) = Server::new(router).spawn("127.0.0.1:8080")?;
+
+      // ... run for a while ...
+
+      handle.shutdown();
+      join.join().unwrap();
+      Ok(())
+  }
+
+ServerHandle::shutdown stops the accept loop. In-flight requests on
+spawned threads finish on their own. The listening socket is released
+as soon as the loop returns.
+
+
+----------------------------------------------------------------------
+11. PLUGINS
+----------------------------------------------------------------------
+
+fornthulani core is frozen. New capability arrives as plugin crates,
+not as changes to src/.
+
+Body parsing plugins (extension traits on Request):
+
+  fornthulani-plugin-json-body
+      use fornthulani_plugin_json_body::JsonBody;
+      let input: NewUser = req.json()?;
+
+  fornthulani-plugin-msgpack-body
+      use fornthulani_plugin_msgpack_body::MsgPackBody;
+      let input: NewUser = req.msgpack()?;
+
+Lifecycle plugins (implement fornthulani::Middleware):
+
+  Attach to every request:
+
+      let server = Server::new(router)
+          .with_middleware(LoggingMiddleware)
+          .with_middleware(CorsMiddleware::permissive());
+
+  Attach to a single route:
+
+      router.get("/admin", admin_dashboard).with(AuthMiddleware::new());
+
+  Middleware::before runs before the controller and can short-circuit
+  by returning Err. Middleware::after runs after a successful dispatch
+  and can mutate the response.
+
+Project-local plugins live in your project's src/plugins/ folder.
+Generate one with:
+
+  fornthulani generate plugin <name>
+
+
+----------------------------------------------------------------------
+12. DESIGN
+----------------------------------------------------------------------
+
+Response-only
+-------------
+
+fornthulani is for APIs that ANSWER. Request bodies are only read when
+a plugin asks for them (fornthulani-plugin-json-body, ...-msgpack-body).
+The core itself does not parse bodies, which keeps the request parser
+at ~40 lines and removes an entire class of buffering bugs.
+
+
+fn controllers, not closures
+----------------------------
+
+  pub type Controller = fn(&Request, &Params) -> Result<Response, ThulaniError>;
+
+Routes hold data. Controllers hold logic. Because controllers are fn
+pointers, the router is Send + Sync for free and registration is one
+line per route:
+
+  router.get("/users/:id", UserController::show);
+
+If a controller needs state, it wraps it in a static or reads it from
+the request.
+
+
+No HTTP dependencies
+--------------------
+
+The HTTP/1.1 request line and headers are parsed directly from
+std::net::TcpStream in src/request.rs. No hyper, no axum, no actix,
+no tokio in the dependency tree.
+
+
+Small
+-----
+
+~500 lines across the core modules:
+
+  src/
+    controller.rs   the Controller type
+    error.rs        ThulaniError + status mapping
+    middleware.rs   the Middleware trait
+    request.rs      HTTP request parser
+    response.rs     Response / FileStream / Body
+    route.rs        the Route builder returned by router.get
+    router.rs       Router + Params + dispatch
+    server.rs       Server + ServerHandle + connection loop
+    status.rs       Status constants
+    lib.rs          re-exports
+
+Every addition must earn its lines.
+
+
+----------------------------------------------------------------------
+13. STATUS
+----------------------------------------------------------------------
+
+0.1.0 — stable enough to build on, small enough to read in an afternoon.
+
+Companion crates (each its own repository):
+
+  fornthulani-gen                 project generator (binary: fornthulani)
+  fornthulani-plugin-json-body    JSON body parsing
+  fornthulani-plugin-msgpack-body MessagePack body parsing
+
+Planned as plugins, NOT core:
+
+  - middleware for CORS, logging, auth
+  - query string parsing
+  - cookie helpers
+  - multipart upload
+
+
+----------------------------------------------------------------------
+14. LICENSE
+----------------------------------------------------------------------
+
+Dual-licensed under MIT or Apache-2.0, at your option.

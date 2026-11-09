@@ -1,0 +1,20 @@
+[package]
+name = "fornthulani"
+version = "0.1.0"
+edition = "2024"
+description = "A micro HTTP framework that responds with JSON, MessagePack, or streamed file downloads. Built from scratch on std::net."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/thomas666-beast/fornthulani"
+keywords = ["http", "server", "json", "msgpack", "micro"]
+categories = ["web-programming::http-server"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rmp-serde = "1"
+mime_guess = "2"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+tempfile = "3"
+
